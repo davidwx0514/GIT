@@ -1,0 +1,113 @@
+| 項目                      | AWS Glue                                                       | AWS Fargate                                                     |
+| ----------------------- | -------------------------------------------------------------- | --------------------------------------------------------------- |
+| 実行環境の準備                 | Spark・Python・ETL ランタイムが事前構成済み。ジョブ作成後すぐ実行可能                     | Docker イメージを自作し、必要な言語やライブラリを構築する必要がある                           |
+| 依存ライブラリ管理               | boto3 や pandas などのライブラリは Glue 側で自動管理。追加も GUI から可能              | requirements.txt や Dockerfile により手動でインストール。互換性確認が必要             |
+| DB 接続情報（ユーザー名・パスワード）の管理 | Glue Connection に JDBC 情報と Secrets Manager を設定すれば、コード側で認証情報は不要 | Secrets Manager から認証情報を取得するコードを自前で実装する必要がある。環境変数の使用もセキュリティリスクあり |
+| データカタログ連携               | Glue Data Catalog との統合が前提。from\_catalog で直接データ取得可能             | boto3 で get\_table を呼び出し、S3 パスやスキーマを自分で管理する必要がある                |
+| 実行パラメータの注入              | GUI 上で Job 引数を定義し、コードで簡単に取得可能（getResolvedOptions）              | タスク定義や起動時に環境変数として渡す。管理が煩雑になりがち                                  |
+| ネットワーク設定（VPC 等）         | ジョブ作成画面で VPC、Subnet、Security Group を選択するだけで完了                  | ECS クラスター、タスク定義、ENI、ルーティング設定など複数リソースの調整が必要                      |
+| ログ設定と監視                 | CloudWatch Logs と自動連携。GUI 上で実行履歴やログ確認が可能                       | awslogs ドライバを明示的に設定し、ロググループやストリームを個別に管理する必要がある                  |
+
+
+例1：DB 接続（認証情報の管理）
+Glue：
+
+python
+复制
+编辑
+connection_options = {
+    "connectionName": "my-jdbc-connection"
+}
+df = glueContext.create_dynamic_frame.from_options(
+    connection_type="jdbc",
+    connection_options=connection_options
+)
+※ 認証情報は Glue Connection に設定済み。Secrets Manager とも統合可能。
+
+Fargate：
+
+python
+复制
+编辑
+import boto3, json
+secrets = boto3.client("secretsmanager").get_secret_value(SecretId="my-db-secret")
+creds = json.loads(secrets["SecretString"])
+user = creds["username"]
+password = creds["password"]
+# その後、JDBC 接続用のライブラリで接続処理を実装
+✅ 例2：S3＋カタログ連携によるデータ読込
+Glue：
+
+python
+复制
+编辑
+dyf = glueContext.create_dynamic_frame.from_catalog(
+    database="sales_db",
+    table_name="orders"
+)
+Fargate：
+
+python
+复制
+编辑
+import boto3
+glue = boto3.client("glue")
+table = glue.get_table(DatabaseName="sales_db", Name="orders")
+s3_path = table["Table"]["StorageDescriptor"]["Location"]
+# s3_path を元にデータを読み込むコードを追加で記述
+✅ 例3：ジョブ実行パラメータの受け取り
+Glue：
+
+python
+复制
+编辑
+from awsglue.utils import getResolvedOptions
+args = getResolvedOptions(sys.argv, ['input_path', 'env'])
+input_path = args['input_path']
+※ GUI で --input_path や --env を設定。
+
+Fargate：
+
+python
+复制
+编辑
+import os
+input_path = os.environ.get("INPUT_PATH")
+※ タスク定義または CLI で環境変数 INPUT_PATH を事前に設定。
+
+✅ 例4：ネットワーク設定（RDS アクセス等）
+Glue：
+
+GUI 上で VPC、Subnet、Security Group を選ぶだけで完了。
+
+Fargate：
+
+以下のリソースを個別に構成する必要あり：
+
+ECS Cluster
+
+Task Definition にネットワークモードの指定
+
+ENI の生成
+
+Subnet/Route Table/NAT Gateway の構成
+
+✅ 例5：ログ出力の設定と確認
+Glue：
+
+ジョブログは自動で CloudWatch Logs に記録され、Glue Console 上から閲覧可能。
+
+Fargate：
+
+json
+复制
+编辑
+"logConfiguration": {
+  "logDriver": "awslogs",
+  "options": {
+    "awslogs-group": "/ecs/my-task",
+    "awslogs-region": "ap-northeast-1",
+    "awslogs-stream-prefix": "ecs"
+  }
+}
+※ 上記を task definition に記述し、CloudWatch 側でロググループを確認。
